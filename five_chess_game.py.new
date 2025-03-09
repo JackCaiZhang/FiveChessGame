@@ -1,0 +1,323 @@
+import pygame
+import sys
+import random
+import json
+import os
+import socket
+import threading
+import pickle
+from collections import defaultdict
+
+# Initialize pygame
+pygame.init()
+
+# Constants
+BASE_WIDTH, BASE_HEIGHT = 800, 800  # Base window size
+BOARD_SIZE = 15  # 15x15 grid
+MIN_ZOOM = 0.5
+MAX_ZOOM = 1.5
+BLACK = (0, 0, 0)
+WHITE = (255, 255, 255)
+BROWN = (210, 180, 140)  # Board color
+RED = (255, 0, 0)  # Highlight color
+GREEN = (0, 128, 0)  # Button color
+GRAY = (128, 128, 128)  # Button color
+LIGHT_GRAY = (200, 200, 200)  # Panel color
+
+# Global variables
+zoom_level = 1.0
+WIDTH, HEIGHT = BASE_WIDTH, BASE_HEIGHT
+GRID_SIZE = int((BASE_WIDTH * 0.8) // (BOARD_SIZE + 1))  # Base grid size without zoom
+board_offset_x = int(BASE_WIDTH * 0.1)  # 10% margin on left
+board_offset_y = int(BASE_HEIGHT * 0.1)  # 10% margin on top
+side_panel_width = int(BASE_WIDTH * 0.2)  # 20% of width for side panel
+
+# Create the screen
+screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.RESIZABLE)
+pygame.display.set_caption('Five Chess Game (Gomoku)')
+
+# Button class for UI elements
+class Button:
+    def __init__(self, x, y, width, height, text, color):
+        self.rect = pygame.Rect(x, y, width, height)
+        self.text = text
+        self.color = color
+        self.hover_color = (min(color[0] + 30, 255), min(color[1] + 30, 255), min(color[2] + 30, 255))
+        self.is_hovered = False
+    
+    def draw(self):
+        color = self.hover_color if self.is_hovered else self.color
+        pygame.draw.rect(screen, color, self.rect)
+        pygame.draw.rect(screen, BLACK, self.rect, 2)  # Border
+        
+        font = pygame.font.Font(None, 28)
+        text_surface = font.render(self.text, True, BLACK)
+        text_rect = text_surface.get_rect(center=self.rect.center)
+        screen.blit(text_surface, text_rect)
+    
+    def check_hover(self, pos):
+        self.is_hovered = self.rect.collidepoint(pos)
+        return self.is_hovered
+    
+    def is_clicked(self, pos):
+        return self.rect.collidepoint(pos)
+
+class Game:
+    def __init__(self):
+        self.board = [[None for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
+        self.current_player = 'BLACK'  # BLACK goes first
+        self.game_over = False
+        self.winner = None
+        self.last_move = None
+        self.vs_ai = True  # By default, play against AI
+        self.ai_player = 'WHITE'  # AI plays as white
+        self.difficulty = 'Medium'  # Default difficulty: Easy, Medium, Hard
+        self.move_history = []  # Store move history for undo functionality
+        self.game_start_time = pygame.time.get_ticks()  # For game timer
+        self.player_times = {'BLACK': 0, 'WHITE': 0}  # Track player times
+        self.last_move_time = pygame.time.get_ticks()  # For tracking turn time
+        
+        # Network multiplayer attributes
+        self.multiplayer = False
+        self.is_host = False
+        self.network = None
+        self.player_color = None  # In multiplayer, which color this client plays
+    
+    def place_piece(self, row, col):
+        """Place a piece on the board at the specified position"""
+        if self.game_over or row < 0 or row >= BOARD_SIZE or col < 0 or col >= BOARD_SIZE:
+            return False
+        
+        if self.board[row][col] is not None:
+            return False  # Cell already occupied
+        
+        # Record current time for player timing
+        current_time = pygame.time.get_ticks()
+        if self.last_move_time > 0:
+            self.player_times[self.current_player] += (current_time - self.last_move_time)
+        self.last_move_time = current_time
+        
+        # Store move in history before making it
+        move_data = {
+            'row': row,
+            'col': col,
+            'player': self.current_player,
+            'board_state': [[cell for cell in row] for row in self.board],
+            'current_player': self.current_player,
+            'game_over': self.game_over,
+            'winner': self.winner,
+            'last_move': self.last_move
+        }
+        self.move_history.append(move_data)
+        
+        # Make the move
+        self.board[row][col] = self.current_player
+        self.last_move = (row, col)
+        
+        # Check for win condition
+        if self.check_win(row, col):
+            self.game_over = True
+            self.winner = self.current_player
+            return True
+        
+        # Check if board is full (draw)
+        if all(self.board[r][c] is not None for r in range(BOARD_SIZE) for c in range(BOARD_SIZE)):
+            self.game_over = True
+            return True
+        
+        # Switch player
+        self.current_player = 'WHITE' if self.current_player == 'BLACK' else 'BLACK'
+        
+        # If it's AI's turn and the game is not over
+        if self.vs_ai and self.current_player == self.ai_player and not self.game_over:
+            self.ai_move()
+        
+        return True
+        
+    def undo_move(self):
+        """Undo the last move"""
+        if not self.move_history:
+            return False  # No moves to undo
+        
+        # Remove the last move from history
+        last_move = self.move_history.pop()
+        
+        # If AI made a move after the player, we need to undo both
+        if self.vs_ai and len(self.move_history) > 0 and self.current_player != self.ai_player:
+            # Remove AI's move too
+            ai_move = self.move_history.pop()
+        
+        # If there are no more moves, reset the game state
+        if not self.move_history:
+            self.reset()
+            return True
+        
+        # Otherwise, restore the previous game state
+        prev_state = self.move_history[-1]
+        self.board = [[cell for cell in row] for row in prev_state['board_state']]
+        self.current_player = prev_state['current_player']
+        self.game_over = prev_state['game_over']
+        self.winner = prev_state['winner']
+        self.last_move = prev_state['last_move']
+        
+        # Update the last move time to now
+        self.last_move_time = pygame.time.get_ticks()
+        
+        return True
+        
+    def check_win(self, row, col):
+        """Check if the current move results in a win"""
+        player = self.board[row][col]
+        
+        # Check all 4 directions (horizontal, vertical, 2 diagonals)
+        directions = [
+            [(0, 1), (0, -1)],  # Horizontal
+            [(1, 0), (-1, 0)],  # Vertical
+            [(1, 1), (-1, -1)],  # Diagonal /
+            [(1, -1), (-1, 1)]   # Diagonal \
+        ]
+        
+        for dir_pair in directions:
+            count = 1  # Count the piece just placed
+            
+            # Check in both directions
+            for dx, dy in dir_pair:
+                for i in range(1, 5):  # Need 5 in a row to win
+                    r, c = row + dx * i, col + dy * i
+                    if 0 <= r < BOARD_SIZE and 0 <= c < BOARD_SIZE and self.board[r][c] == player:
+                        count += 1
+                    else:
+                        break
+            
+            if count >= 5:
+                return True
+        
+        return False
+    
+    def reset(self):
+        """Reset the game"""
+        self.board = [[None for _ in range(BOARD_SIZE)] for _ in range(BOARD_SIZE)]
+        self.current_player = 'BLACK'
+        self.game_over = False
+        self.winner = None
+        self.last_move = None
+        self.move_history = []
+        self.game_start_time = pygame.time.get_ticks()
+        self.player_times = {'BLACK': 0, 'WHITE': 0}
+        self.last_move_time = pygame.time.get_ticks()
+    
+    def ai_move(self):
+        """Make a move for the AI player based on current difficulty"""
+        # Get all valid moves (empty cells)
+        valid_moves = []
+        for row in range(BOARD_SIZE):
+            for col in range(BOARD_SIZE):
+                if self.board[row][col] is None:
+                    valid_moves.append((row, col))
+        
+        if not valid_moves:
+            return  # No valid moves
+        
+        # Evaluate each move
+        best_move = None
+        best_score = -float('inf')
+        
+        # Set randomness factor based on difficulty
+        if self.difficulty == 'Easy':
+            randomness = 20  # High randomness for easy mode
+            depth = 0  # No look-ahead for faster response
+        elif self.difficulty == 'Medium':
+            randomness = 5   # Medium randomness
+            depth = 1  # Less look-ahead for better responsiveness
+        else:  # Hard
+            randomness = 1   # Low randomness for hard mode
+            depth = 2  # Reduced look-ahead for better responsiveness
+        
+        # Optimize: First check if there's a winning move or a move to block opponent's win or threat
+        opponent = 'WHITE' if self.current_player == 'BLACK' else 'BLACK'
+        
+        # First priority: Check for immediate winning move
+        for row, col in valid_moves:
+            self.board[row][col] = self.current_player
+            if self.check_win(row, col):
+                self.board[row][col] = None  # Undo the move
+                self.place_piece(row, col)   # Make the winning move
+                return
+            self.board[row][col] = None  # Undo the move
+        
+        # Second priority: Block opponent's immediate winning move
+        for row, col in valid_moves:
+            self.board[row][col] = opponent
+            if self.check_win(row, col):
+                self.board[row][col] = None  # Undo the move
+                self.place_piece(row, col)   # Block opponent's winning move
+                return
+            self.board[row][col] = None  # Undo the move
+            
+        # Third priority: Check for opponent's potential threats (3 or 4 in a row with open ends)
+        threat_moves = []
+        for row, col in valid_moves:
+            threat_score = self.check_opponent_threat(row, col, opponent)
+            if threat_score > 0:
+                threat_moves.append((row, col, threat_score))
+        
+        # If we found threatening moves, block the most serious one
+        if threat_moves:
+            # Sort by threat score (highest first)
+            threat_moves.sort(key=lambda x: x[2], reverse=True)
+            self.place_piece(threat_moves[0][0], threat_moves[0][1])  # Block the biggest threat
+            return
+        
+        # If no immediate winning or blocking move, evaluate positions
+        # Limit the number of positions to evaluate for better responsiveness
+        max_positions = 20 if self.difficulty == 'Hard' else 10
+        if len(valid_moves) > max_positions:
+            # Prioritize moves near the center and existing pieces
+            center = BOARD_SIZE // 2
+            valid_moves.sort(key=lambda pos: abs(pos[0] - center) + abs(pos[1] - center))
+            valid_moves = valid_moves[:max_positions]
+        
+        for row, col in valid_moves:
+            # Try this move
+            score = self.evaluate_move(row, col, depth)
+            
+            # Add randomness to make AI less predictable (more for easy, less for hard)
+            score += random.uniform(0, randomness)
+            
+            if score > best_score:
+                best_score = score
+                best_move = (row, col)
+        
+        # Make the best move
+        if best_move:
+            self.place_piece(best_move[0], best_move[1])
+    
+    def check_opponent_threat(self, row, col, opponent):
+        """Check if placing a piece at this position would block a potential threat from opponent"""
+        # Temporarily place our piece here
+        self.board[row][col] = self.current_player
+        threat_score = 0
+        
+        # Check all 4 directions (horizontal, vertical, 2 diagonals)
+        directions = [
+            [(0, 1), (0, -1)],  # Horizontal
+            [(1, 0), (-1, 0)],  # Vertical
+            [(1, 1), (-1, -1)],  # Diagonal /
+            [(1, -1), (-1, 1)]   # Diagonal \
+        ]
+        
+        # For each direction, check if there's a potential threat
+        for dir_pair in directions:
+            # Check for opponent's potential threats in this direction
+            for dx, dy in [(dx, dy) for pair in [dir_pair] for dx, dy in pair]:
+                # Look for patterns like "OO_OO" or "OOO_O" where O is opponent and _ is empty
+                # These are potential winning patterns that we should block
+                
+                # Count opponent pieces and open ends in this direction
+                opponent_count = 0
+                open_ends = 0
+                
+                # Check in one direction
+                for i in range(1, 5):
+                    r, c = row + dx * i, col + dy * i
+                    if 0 <= r < BOARD_SIZE and

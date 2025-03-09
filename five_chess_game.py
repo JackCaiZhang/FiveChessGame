@@ -6,24 +6,35 @@ import os
 import socket
 import threading
 import pickle
+import time
 from collections import defaultdict
 
 # Initialize pygame
 pygame.init()
 
 # Constants
-WIDTH, HEIGHT = 600, 650  # Increased height for buttons
+BASE_WIDTH, BASE_HEIGHT = 800, 800  # Base window size
 BOARD_SIZE = 15  # 15x15 grid
-GRID_SIZE = WIDTH // (BOARD_SIZE + 1)
+MIN_ZOOM = 0.5
+MAX_ZOOM = 1.5
 BLACK = (0, 0, 0)
 WHITE = (255, 255, 255)
 BROWN = (210, 180, 140)  # Board color
 RED = (255, 0, 0)  # Highlight color
 GREEN = (0, 128, 0)  # Button color
 GRAY = (128, 128, 128)  # Button color
+LIGHT_GRAY = (200, 200, 200)  # Panel color
+
+# Global variables
+zoom_level = 1.0
+WIDTH, HEIGHT = BASE_WIDTH, BASE_HEIGHT
+GRID_SIZE = int((BASE_WIDTH * 0.8) // (BOARD_SIZE + 1))  # Base grid size without zoom
+board_offset_x = int(BASE_WIDTH * 0.1)  # 10% margin on left
+board_offset_y = int(BASE_HEIGHT * 0.1)  # 10% margin on top
+side_panel_width = int(BASE_WIDTH * 0.2)  # 20% of width for side panel
 
 # Create the screen
-screen = pygame.display.set_mode((WIDTH, HEIGHT))
+screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.RESIZABLE)
 pygame.display.set_caption('Five Chess Game (Gomoku)')
 
 # Button class for UI elements
@@ -155,149 +166,16 @@ class Game:
         
         return True
         
-    def ai_move(self):
-        """Make a move for the AI player based on current difficulty"""
-        # Get all valid moves (empty cells)
-        valid_moves = []
-        for row in range(BOARD_SIZE):
-            for col in range(BOARD_SIZE):
-                if self.board[row][col] is None:
-                    valid_moves.append((row, col))
-        
-        if not valid_moves:
-            return  # No valid moves
-        
-        # Evaluate each move
-        best_move = None
-        best_score = -float('inf')
-        
-        # Set randomness factor based on difficulty
-        if self.difficulty == 'Easy':
-            randomness = 20  # High randomness for easy mode
-            depth = 1  # Less look-ahead
-        elif self.difficulty == 'Medium':
-            randomness = 5   # Medium randomness
-            depth = 2  # Medium look-ahead
-        else:  # Hard
-            randomness = 1   # Low randomness for hard mode
-            depth = 3  # More look-ahead
-        
-        for row, col in valid_moves:
-            # Try this move
-            score = self.evaluate_move(row, col, depth)
-            
-            # Add randomness to make AI less predictable (more for easy, less for hard)
-            score += random.uniform(0, randomness)
-            
-            if score > best_score:
-                best_score = score
-                best_move = (row, col)
-        
-        # Make the best move
-        if best_move:
-            self.place_piece(best_move[0], best_move[1])
-    
-    def evaluate_move(self, row, col, depth=2):
-        """Evaluate a potential move for the AI with look-ahead based on difficulty"""
-        score = 0
-        
-        # Check if AI can win with this move
-        self.board[row][col] = self.ai_player
-        if self.check_win(row, col):
-            self.board[row][col] = None
-            return 1000  # Very high score for winning move
-        
-        # Check if AI needs to block opponent's winning move
-        opponent = 'BLACK' if self.ai_player == 'WHITE' else 'WHITE'
-        self.board[row][col] = opponent
-        if self.check_win(row, col):
-            self.board[row][col] = None
-            return 900  # High score for blocking opponent's win
-        
-        # Reset the cell
-        self.board[row][col] = None
-        
-        # Look ahead for deeper evaluation if depth > 1
-        if depth > 1:
-            # Temporarily place AI's piece
-            self.board[row][col] = self.ai_player
-            
-            # Check opponent's best response
-            min_opponent_score = float('inf')
-            
-            # Check a few key positions around this move
-            for dr in range(-2, 3):
-                for dc in range(-2, 3):
-                    r, c = row + dr, col + dc
-                    if 0 <= r < BOARD_SIZE and 0 <= c < BOARD_SIZE and self.board[r][c] is None:
-                        # Evaluate opponent's move with reduced depth
-                        opponent_score = self.evaluate_move(r, c, depth - 1)
-                        min_opponent_score = min(min_opponent_score, opponent_score)
-            
-            # Reset the cell
-            self.board[row][col] = None
-            
-            # Adjust score based on opponent's best response
-            if min_opponent_score < float('inf'):
-                score -= min_opponent_score * 0.5  # Discount opponent's advantage
-        
-        # Evaluate position based on patterns around this move
-        directions = [
-            [(0, 1), (0, -1)],   # Horizontal
-            [(1, 0), (-1, 0)],   # Vertical
-            [(1, 1), (-1, -1)],  # Diagonal \
-            [(1, -1), (-1, 1)]   # Diagonal /
-        ]
-        
-        for dir_pair in directions:
-            # Count AI's pieces and empty spaces in this direction
-            ai_count = 0
-            empty_count = 1  # Count the current empty cell
-            
-            for dx, dy in dir_pair:
-                for i in range(1, 5):
-                    r, c = row + dx * i, col + dy * i
-                    if 0 <= r < BOARD_SIZE and 0 <= c < BOARD_SIZE:
-                        if self.board[r][c] == self.ai_player:
-                            ai_count += 1
-                        elif self.board[r][c] is None:
-                            empty_count += 1
-                        else:
-                            break
-                    else:
-                        break
-            
-            # Score based on potential to form a line
-            if ai_count >= 3 and empty_count >= 5:
-                score += 50 * ai_count
-            elif ai_count >= 2 and empty_count >= 5:
-                score += 10 * ai_count
-            elif empty_count >= 5:
-                score += 5
-        
-        # Prefer center and areas near existing pieces
-        center_distance = abs(row - BOARD_SIZE // 2) + abs(col - BOARD_SIZE // 2)
-        score -= center_distance  # Prefer center
-        
-        # Check if move is adjacent to existing pieces
-        for dr in [-1, 0, 1]:
-            for dc in [-1, 0, 1]:
-                if dr == 0 and dc == 0:
-                    continue
-                r, c = row + dr, col + dc
-                if 0 <= r < BOARD_SIZE and 0 <= c < BOARD_SIZE and self.board[r][c] is not None:
-                    score += 5  # Bonus for moves adjacent to existing pieces
-        
-        return score
-    
     def check_win(self, row, col):
-        """Check if the current player has won after placing a piece"""
+        """Check if the current move results in a win"""
         player = self.board[row][col]
+        
+        # Check all 4 directions (horizontal, vertical, 2 diagonals)
         directions = [
-            [(0, 1), (0, -1)],   # Horizontal
-            [(1, 0), (-1, 0)],   # Vertical
-            [(1, 1), (-1, -1)],  # Diagonal \
-            [(1, -1), (-1, 1)]   # Diagonal /
+            [(0, 1), (0, -1)],  # Horizontal
+            [(1, 0), (-1, 0)],  # Vertical
+            [(1, 1), (-1, -1)],  # Diagonal /
+            [(1, -1), (-1, 1)]   # Diagonal \
         ]
         
         for dir_pair in directions:
@@ -316,6 +194,82 @@ class Game:
                 return True
         
         return False
+        
+    def check_opponent_threat(self, row, col, opponent):
+        """Check if placing a piece at this position would block a potential threat from opponent"""
+        # Temporarily place our piece here
+        self.board[row][col] = self.current_player
+        threat_score = 0
+        
+        # Check all 4 directions (horizontal, vertical, 2 diagonals)
+        directions = [
+            [(0, 1), (0, -1)],  # Horizontal
+            [(1, 0), (-1, 0)],  # Vertical
+            [(1, 1), (-1, -1)],  # Diagonal /
+            [(1, -1), (-1, 1)]   # Diagonal \
+        ]
+        
+        # Early termination if we find a very high threat
+        max_threat_found = False
+        
+        for dir_pair in directions:
+            if max_threat_found:
+                break
+                
+            # Check for opponent's potential threats in this direction
+            for dx, dy in dir_pair:
+                # Look for opponent's pieces in this direction
+                opponent_count = 0
+                open_ends = 0
+                
+                # Check up to 4 spaces in this direction
+                for i in range(1, 5):
+                    r, c = row + dx * i, col + dy * i
+                    if 0 <= r < BOARD_SIZE and 0 <= c < BOARD_SIZE:
+                        if self.board[r][c] == opponent:
+                            opponent_count += 1
+                        elif self.board[r][c] is None:
+                            open_ends += 1
+                            break
+                        else:
+                            break
+                    else:
+                        break
+                
+                # Check the opposite direction for open ends and opponent pieces
+                for i in range(1, 5):
+                    r, c = row - dx * i, col - dy * i
+                    if 0 <= r < BOARD_SIZE and 0 <= c < BOARD_SIZE:
+                        if self.board[r][c] == opponent:
+                            opponent_count += 1
+                        elif self.board[r][c] is None:
+                            open_ends += 1
+                            break
+                        else:
+                            break
+                    else:
+                        break
+                
+                # Score the threat
+                if opponent_count >= 4 and open_ends >= 1:
+                    # Critical threat: opponent has 4 in a row with an open end
+                    threat_score = max(threat_score, 100)
+                    max_threat_found = True  # Early termination
+                    break
+                elif opponent_count == 3 and open_ends >= 2:
+                    # Serious threat: opponent has 3 in a row with two open ends
+                    threat_score = max(threat_score, 80)
+                elif opponent_count == 3 and open_ends == 1:
+                    # Moderate threat: opponent has 3 in a row with one open end
+                    threat_score = max(threat_score, 50)
+                elif opponent_count == 2 and open_ends >= 2:
+                    # Minor threat: opponent has 2 in a row with two open ends
+                    threat_score = max(threat_score, 30)
+        
+        # Undo our temporary move
+        self.board[row][col] = None
+        
+        return threat_score
     
     def reset(self):
         """Reset the game"""
@@ -335,6 +289,277 @@ class Game:
         if self.vs_ai and self.ai_player == 'BLACK':
             self.ai_move()
             
+    def ai_move(self):
+        """Make a move for the AI player based on current difficulty"""
+        # Get all valid moves (empty cells)
+        valid_moves = []
+        for row in range(BOARD_SIZE):
+            for col in range(BOARD_SIZE):
+                if self.board[row][col] is None:
+                    valid_moves.append((row, col))
+        
+        if not valid_moves:
+            return  # No valid moves
+        
+        # Evaluate each move
+        best_move = None
+        best_score = -float('inf')
+        
+        # Set randomness factor based on difficulty
+        if self.difficulty == 'Easy':
+            randomness = 20  # High randomness for easy mode
+            depth = 0  # No look-ahead for faster response
+        elif self.difficulty == 'Medium':
+            randomness = 5   # Medium randomness
+            depth = 1  # Less look-ahead for better responsiveness
+        else:  # Hard
+            randomness = 1   # Low randomness for hard mode
+            depth = 1  # Reduced look-ahead depth for better responsiveness while maintaining intelligence
+        
+        # Optimize: First check if there's a winning move or a move to block opponent's win or threat
+        opponent = 'WHITE' if self.current_player == 'BLACK' else 'BLACK'
+        
+        # First priority: Check for immediate winning move
+        for row, col in valid_moves:
+            self.board[row][col] = self.current_player
+            if self.check_win(row, col):
+                self.board[row][col] = None  # Undo the move
+                self.place_piece(row, col)   # Make the winning move
+                return
+            self.board[row][col] = None  # Undo the move
+        
+        # Second priority: Block opponent's immediate winning move
+        for row, col in valid_moves:
+            self.board[row][col] = opponent
+            if self.check_win(row, col):
+                self.board[row][col] = None  # Undo the move
+                self.place_piece(row, col)   # Block opponent's winning move
+                return
+            self.board[row][col] = None  # Undo the move
+            
+        # Third priority: Check for opponent's potential threats (3 or 4 in a row with open ends)
+        threat_moves = []
+        for row, col in valid_moves:
+            threat_score = self.check_opponent_threat(row, col, opponent)
+            if threat_score > 0:
+                threat_moves.append((row, col, threat_score))
+        
+        # If we found threatening moves, block the most serious one
+        if threat_moves:
+            # Sort by threat score (highest first)
+            threat_moves.sort(key=lambda x: x[2], reverse=True)
+            self.place_piece(threat_moves[0][0], threat_moves[0][1])  # Block the biggest threat
+            return
+        
+        # If no immediate winning or blocking move, evaluate positions
+        # Limit the number of positions to evaluate for better responsiveness
+        max_positions = 20 if self.difficulty == 'Hard' else 15
+        
+        # Count the number of moves made so far
+        moves_made = sum(1 for r in range(BOARD_SIZE) for c in range(BOARD_SIZE) if self.board[r][c] is not None)
+        
+        # For the first few moves, prioritize responding near the player's pieces
+        if moves_made <= 4:
+            # Find player's pieces and prioritize moves near them
+            player_pieces = []
+            for r in range(BOARD_SIZE):
+                for c in range(BOARD_SIZE):
+                    if self.board[r][c] == opponent:
+                        player_pieces.append((r, c))
+            
+            # Sort valid moves by proximity to player's pieces
+            if player_pieces:
+                valid_moves.sort(key=lambda pos: min(abs(pos[0] - r) + abs(pos[1] - c) for r, c in player_pieces))
+                # Take more positions to evaluate in early game for better response
+                valid_moves = valid_moves[:max_positions]
+            else:
+                # If no player pieces yet (first move), prioritize center
+                center = BOARD_SIZE // 2
+                valid_moves.sort(key=lambda pos: abs(pos[0] - center) + abs(pos[1] - center))
+                valid_moves = valid_moves[:max_positions]
+        else:
+            # Later in the game, balance between center control and responding to player
+            center = BOARD_SIZE // 2
+            valid_moves.sort(key=lambda pos: abs(pos[0] - center) + abs(pos[1] - center))
+            valid_moves = valid_moves[:max_positions]
+        
+        # Set a time limit for move evaluation to prevent unresponsiveness
+        start_time = time.time()
+        time_limit = 0.5  # Maximum time in seconds for move evaluation
+        
+        for row, col in valid_moves:
+            # Check if we've exceeded the time limit
+            if time.time() - start_time > time_limit:
+                break
+                
+            # Try this move
+            score = self.evaluate_move(row, col, depth)
+            
+            # Add randomness to make AI less predictable (more for easy, less for hard)
+            score += random.uniform(0, randomness)
+            
+            if score > best_score:
+                best_score = score
+                best_move = (row, col)
+        
+        # Make the best move
+        if best_move:
+            self.place_piece(best_move[0], best_move[1])
+        # If we somehow don't have a best move (e.g., time limit exceeded before evaluation),
+        # just pick the first valid move
+    
+    def evaluate_move(self, row, col, depth):
+        """Evaluate a potential move at the given position"""
+        # Base score for this position
+        score = 0
+        
+        # Try placing the piece
+        self.board[row][col] = self.current_player
+        
+        # Check if this move would win
+        if self.check_win(row, col):
+            score = 1000  # Very high score for winning move
+        else:
+            # Evaluate position based on threats
+            score = self.evaluate_position(row, col)
+            
+            # Look ahead if depth > 0
+            if depth > 0:
+                # Switch player temporarily
+                self.current_player = 'WHITE' if self.current_player == 'BLACK' else 'BLACK'
+                
+                # Find opponent's best response
+                opponent_best_score = -float('inf')
+                
+                # Limit the number of responses to evaluate for better performance
+                response_moves = []
+                for r in range(BOARD_SIZE):
+                    for c in range(BOARD_SIZE):
+                        if self.board[r][c] is None:
+                            response_moves.append((r, c))
+                
+                # Prioritize center and positions near existing pieces
+                center = BOARD_SIZE // 2
+                response_moves.sort(key=lambda pos: abs(pos[0] - center) + abs(pos[1] - center))
+                response_moves = response_moves[:15]  # Limit to 15 positions for better performance
+                
+                # Check all valid responses
+                for r, c in response_moves:
+                    # Recursively evaluate this response
+                    response_score = self.evaluate_move(r, c, depth - 1)
+                    opponent_best_score = max(opponent_best_score, response_score)
+                    
+                    # Early termination if we found a very good move for opponent
+                    if opponent_best_score > 500:
+                        break
+                
+                # Subtract opponent's best score (minimax principle)
+                if opponent_best_score != -float('inf'):
+                    score -= opponent_best_score
+                
+                # Switch back to original player
+                self.current_player = 'WHITE' if self.current_player == 'BLACK' else 'BLACK'
+        
+        # Undo the move
+        self.board[row][col] = None
+        
+        return score
+    
+    def evaluate_position(self, row, col):
+        """Evaluate the strength of a position based on threats and proximity to existing pieces"""
+        player = self.current_player
+        score = 0
+        
+        # Check all 4 directions (horizontal, vertical, 2 diagonals)
+        directions = [
+            [(0, 1), (0, -1)],  # Horizontal
+            [(1, 0), (-1, 0)],  # Vertical
+            [(1, 1), (-1, -1)],  # Diagonal /
+            [(1, -1), (-1, 1)]   # Diagonal \
+        ]
+        
+        for dir_pair in directions:
+            # Count consecutive pieces and open ends
+            consecutive = 1  # The piece we just placed
+            open_ends = 0
+            
+            # Check both directions
+            for dx, dy in dir_pair:
+                # Count consecutive pieces in this direction
+                for i in range(1, 5):
+                    r, c = row + dx * i, col + dy * i
+                    if 0 <= r < BOARD_SIZE and 0 <= c < BOARD_SIZE:
+                        if self.board[r][c] == player:
+                            consecutive += 1
+                        elif self.board[r][c] is None:
+                            open_ends += 1
+                            break
+                        else:
+                            break
+                    else:
+                        break
+            
+            # Score based on consecutive pieces and open ends
+            if consecutive >= 5:
+                score += 100  # Win
+            elif consecutive == 4:
+                if open_ends >= 1:
+                    score += 50  # Four in a row with an open end
+                else:
+                    score += 25  # Four in a row with no open ends still valuable
+            elif consecutive == 3:
+                if open_ends == 2:
+                    score += 20  # Three in a row with two open ends - increased value
+                elif open_ends == 1:
+                    score += 10  # Three in a row with one open end - increased value
+                else:
+                    score += 5   # Even blocked three in a row has some value
+            elif consecutive == 2:
+                if open_ends == 2:
+                    score += 8   # Two in a row with two open ends - increased value
+                elif open_ends == 1:
+                    score += 3   # Two in a row with one open end
+        
+        # Add proximity score to encourage AI to play near existing pieces
+        # This is especially important for the first few moves
+        opponent = 'BLACK' if player == 'WHITE' else 'WHITE'
+        proximity_score = 0
+        
+        # Count the number of moves made so far to adjust proximity importance
+        moves_made = sum(1 for r in range(BOARD_SIZE) for c in range(BOARD_SIZE) if self.board[r][c] is not None)
+        
+        # Proximity is much more important in early game (first few moves)
+        # Significantly increased weight for early moves to ensure AI responds to player moves
+        proximity_weight = max(50 - moves_made * 5, 10)  # Decreases as more moves are made, but stays significant
+        
+        # Find the closest opponent piece and give higher score for proximity
+        min_distance = float('inf')
+        for r in range(BOARD_SIZE):
+            for c in range(BOARD_SIZE):
+                if self.board[r][c] == opponent:
+                    # Manhattan distance to opponent piece
+                    distance = abs(row - r) + abs(col - c)
+                    min_distance = min(min_distance, distance)
+                    
+                    # Special case for very close positions (adjacent or diagonal)
+                    if distance <= 2:
+                        # Strongly prefer positions that are adjacent to opponent pieces
+                        proximity_score += proximity_weight * 3
+        
+        # Convert distance to score (closer = higher score)
+        if min_distance != float('inf'):
+            # Score is higher for positions closer to opponent pieces
+            # For the first move response, this strongly encourages playing nearby
+            proximity_score = proximity_weight * (15 - min(min_distance, 15))
+            
+            # Extra bonus for positions that are very close to opponent pieces
+            if min_distance <= 1:
+                proximity_score *= 2  # Double the score for adjacent positions
+            
+            score += proximity_score
+        
+        return score
+    
     def save_game(self, filename='saved_game.json'):
         """Save the current game state to a file"""
         game_state = {
@@ -402,20 +627,44 @@ class Game:
             print(f"Error loading game: {e}")
             return False
 
+def update_display_sizes(new_width, new_height):
+    """Update all display-related sizes when window is resized"""
+    global WIDTH, HEIGHT, GRID_SIZE, board_offset_x, board_offset_y, side_panel_width
+    
+    WIDTH, HEIGHT = new_width, new_height
+    
+    # Calculate new sizes based on window dimensions
+    side_panel_width = int(WIDTH * 0.2)  # 20% of width for side panel
+    board_area_width = WIDTH - side_panel_width
+    
+    # Calculate base grid size without zoom
+    base_grid_size = int(min(board_area_width, HEIGHT * 0.8) // (BOARD_SIZE + 1))
+    
+    # Apply zoom to grid size
+    GRID_SIZE = int(base_grid_size * zoom_level)
+    
+    # Center the board in the available area
+    board_width = GRID_SIZE * (BOARD_SIZE + 1)
+    board_offset_x = (board_area_width - board_width) // 2
+    board_offset_y = (HEIGHT - board_width) // 2
+
 def draw_board():
     """Draw the game board"""
-    screen.fill(BROWN)
+    # Draw board background
+    board_width = GRID_SIZE * (BOARD_SIZE + 1)
+    board_rect = pygame.Rect(board_offset_x, board_offset_y, board_width, board_width)
+    pygame.draw.rect(screen, BROWN, board_rect)
     
     # Draw grid lines
     for i in range(1, BOARD_SIZE + 1):
         # Vertical lines
         pygame.draw.line(screen, BLACK, 
-                        (i * GRID_SIZE, GRID_SIZE), 
-                        (i * GRID_SIZE, HEIGHT - GRID_SIZE), 2)
+                        (board_offset_x + i * GRID_SIZE, board_offset_y + GRID_SIZE), 
+                        (board_offset_x + i * GRID_SIZE, board_offset_y + board_width - GRID_SIZE), 2)
         # Horizontal lines
         pygame.draw.line(screen, BLACK, 
-                        (GRID_SIZE, i * GRID_SIZE), 
-                        (WIDTH - GRID_SIZE, i * GRID_SIZE), 2)
+                        (board_offset_x + GRID_SIZE, board_offset_y + i * GRID_SIZE), 
+                        (board_offset_x + board_width - GRID_SIZE, board_offset_y + i * GRID_SIZE), 2)
     
     # Draw center dot and corner dots
     center = BOARD_SIZE // 2 + 1
@@ -424,7 +673,7 @@ def draw_board():
     
     for dot in dots:
         pygame.draw.circle(screen, BLACK, 
-                          (dot[0] * GRID_SIZE, dot[1] * GRID_SIZE), 5)
+                          (board_offset_x + dot[0] * GRID_SIZE, board_offset_y + dot[1] * GRID_SIZE), 5)
 
 def draw_pieces(game):
     """Draw the pieces on the board"""
@@ -433,25 +682,36 @@ def draw_pieces(game):
             if game.board[row][col] is not None:
                 color = BLACK if game.board[row][col] == 'BLACK' else WHITE
                 pygame.draw.circle(screen, color, 
-                                 ((col + 1) * GRID_SIZE, (row + 1) * GRID_SIZE), 
+                                 (board_offset_x + (col + 1) * GRID_SIZE, board_offset_y + (row + 1) * GRID_SIZE), 
                                  GRID_SIZE // 2 - 2)
                 
                 # Draw a border for white pieces to make them more visible
                 if game.board[row][col] == 'WHITE':
                     pygame.draw.circle(screen, BLACK, 
-                                     ((col + 1) * GRID_SIZE, (row + 1) * GRID_SIZE), 
+                                     (board_offset_x + (col + 1) * GRID_SIZE, board_offset_y + (row + 1) * GRID_SIZE), 
                                      GRID_SIZE // 2 - 2, 1)
     
     # Highlight the last move
     if game.last_move:
         row, col = game.last_move
         pygame.draw.rect(screen, RED, 
-                        ((col + 1) * GRID_SIZE - 5, (row + 1) * GRID_SIZE - 5, 10, 10), 2)
+                        (board_offset_x + (col + 1) * GRID_SIZE - 5, board_offset_y + (row + 1) * GRID_SIZE - 5, 10, 10), 2)
 
-def draw_status(game):
-    """Draw the game status and timer"""
-    font = pygame.font.Font(None, 36)
-    small_font = pygame.font.Font(None, 24)
+def draw_side_panel(game):
+    """Draw the side panel with game information"""
+    # Draw side panel background
+    panel_rect = pygame.Rect(WIDTH - side_panel_width, 0, side_panel_width, HEIGHT)
+    pygame.draw.rect(screen, LIGHT_GRAY, panel_rect)
+    pygame.draw.line(screen, BLACK, (WIDTH - side_panel_width, 0), (WIDTH - side_panel_width, HEIGHT), 2)
+    
+    # Draw game status and information - scale font sizes with zoom level
+    font_size = int(32 * min(1.5, max(0.8, zoom_level)))
+    small_font_size = int(24 * min(1.5, max(0.8, zoom_level)))
+    font = pygame.font.Font(None, font_size)
+    small_font = pygame.font.Font(None, small_font_size)
+    
+    # Initialize sub_text with an empty string
+    sub_text = ""
     
     # Game status
     if game.game_over:
@@ -461,18 +721,29 @@ def draw_status(game):
             text = "DRAW!"
     else:
         if game.multiplayer:
-            text = f"Current Player: {game.current_player} (You: {game.player_color})"
+            text = f"Player: {game.current_player}"
+            sub_text = f"(You: {game.player_color})"
         elif game.vs_ai and game.current_player == game.ai_player:
-            text = f"AI ({game.difficulty}) is thinking..."
+            text = f"AI is thinking..."
+            sub_text = f"Difficulty: {game.difficulty}"
         else:
-            text = f"Current Player: {game.current_player}"
+            text = f"Player: {game.current_player}"
+            sub_text = ""
     
+    # Display game status
+    y_pos = 20
     text_surface = font.render(text, True, BLACK)
-    text_rect = text_surface.get_rect(center=(WIDTH // 2, 30))
-    pygame.draw.rect(screen, BROWN, text_rect)
+    text_rect = text_surface.get_rect(center=(WIDTH - side_panel_width//2, y_pos))
     screen.blit(text_surface, text_rect)
     
+    if sub_text:
+        y_pos += 30
+        sub_text_surface = small_font.render(sub_text, True, BLACK)
+        sub_text_rect = sub_text_surface.get_rect(center=(WIDTH - side_panel_width//2, y_pos))
+        screen.blit(sub_text_surface, sub_text_rect)
+    
     # Game timer
+    y_pos += 50
     current_time = pygame.time.get_ticks()
     game_time = (current_time - game.game_start_time) // 1000  # Convert to seconds
     minutes, seconds = divmod(game_time, 60)
@@ -488,9 +759,11 @@ def draw_status(game):
     # Display game time
     time_text = f"Game Time: {minutes:02d}:{seconds:02d}"
     time_surface = small_font.render(time_text, True, BLACK)
-    screen.blit(time_surface, (10, 10))
+    time_rect = time_surface.get_rect(center=(WIDTH - side_panel_width//2, y_pos))
+    screen.blit(time_surface, time_rect)
     
     # Display player times
+    y_pos += 30
     black_minutes, black_seconds = divmod(game.player_times['BLACK'] // 1000, 60)
     white_minutes, white_seconds = divmod(game.player_times['WHITE'] // 1000, 60)
     
@@ -500,8 +773,25 @@ def draw_status(game):
     black_time_surface = small_font.render(black_time_text, True, BLACK)
     white_time_surface = small_font.render(white_time_text, True, BLACK)
     
-    screen.blit(black_time_surface, (WIDTH - 120, 10))
-    screen.blit(white_time_surface, (WIDTH - 120, 30))
+    black_time_rect = black_time_surface.get_rect(center=(WIDTH - side_panel_width//2, y_pos))
+    screen.blit(black_time_surface, black_time_rect)
+    
+    y_pos += 25
+    white_time_rect = white_time_surface.get_rect(center=(WIDTH - side_panel_width//2, y_pos))
+    screen.blit(white_time_surface, white_time_rect)
+    
+    # Zoom instructions
+    y_pos += 50
+    zoom_text = f"Zoom: {zoom_level:.1f}x"
+    zoom_surface = small_font.render(zoom_text, True, BLACK)
+    zoom_rect = zoom_surface.get_rect(center=(WIDTH - side_panel_width//2, y_pos))
+    screen.blit(zoom_surface, zoom_rect)
+    
+    y_pos += 25
+    help_text = "Mouse wheel to zoom"
+    help_surface = small_font.render(help_text, True, BLACK)
+    help_rect = help_surface.get_rect(center=(WIDTH - side_panel_width//2, y_pos))
+    screen.blit(help_surface, help_rect)
 
 def draw_buttons(buttons):
     """Draw all UI buttons"""
@@ -695,26 +985,30 @@ def main():
     game = Game()
     clock = pygame.time.Clock()
     
+    # Update initial display sizes
+    update_display_sizes(BASE_WIDTH, BASE_HEIGHT)
+    
     # Create buttons
     button_width, button_height = 120, 40
     small_button_width = 80
+    button_margin = 10
     
     # Main control buttons
-    restart_button = Button(WIDTH // 2 - 180, HEIGHT - 50, button_width, button_height, "Restart", GREEN)
-    exit_button = Button(WIDTH // 2 + 60, HEIGHT - 50, button_width, button_height, "Exit", RED)
-    mode_button = Button(WIDTH // 2 - 60, HEIGHT - 50, button_width, button_height, "vs AI: ON", GRAY)
+    restart_button = Button(0, 0, button_width, button_height, "Restart", GREEN)
+    exit_button = Button(0, 0, button_width, button_height, "Exit", RED)
+    mode_button = Button(0, 0, button_width, button_height, "vs AI: ON", GRAY)
     
     # Game feature buttons
-    undo_button = Button(10, HEIGHT - 100, small_button_width, button_height, "Undo", GRAY)
-    save_button = Button(100, HEIGHT - 100, small_button_width, button_height, "Save", GRAY)
-    load_button = Button(190, HEIGHT - 100, small_button_width, button_height, "Load", GRAY)
+    undo_button = Button(0, 0, small_button_width, button_height, "Undo", GRAY)
+    save_button = Button(0, 0, small_button_width, button_height, "Save", GRAY)
+    load_button = Button(0, 0, small_button_width, button_height, "Load", GRAY)
     
-    # Difficulty buttons
-    difficulty_button = Button(WIDTH - 90, HEIGHT - 100, small_button_width, button_height, game.difficulty, GRAY)
+    # Difficulty button
+    difficulty_button = Button(0, 0, small_button_width, button_height, game.difficulty, GRAY)
     
     # Network multiplayer buttons
-    host_button = Button(280, HEIGHT - 100, small_button_width, button_height, "Host", GRAY)
-    join_button = Button(370, HEIGHT - 100, small_button_width, button_height, "Join", GRAY)
+    host_button = Button(0, 0, small_button_width, button_height, "Host", GRAY)
+    join_button = Button(0, 0, small_button_width, button_height, "Join", GRAY)
     
     # Collect all buttons
     buttons = [restart_button, exit_button, mode_button, undo_button, 
@@ -722,6 +1016,50 @@ def main():
     
     # Initialize network manager as None
     network = None
+    
+    # Calculate button positions based on window size
+    def update_button_positions():
+        # Bottom control panel
+        panel_height = 60
+        panel_y = HEIGHT - panel_height
+        
+        # Main control buttons (centered at bottom)
+        restart_button.rect.x = (WIDTH - side_panel_width - button_width * 3 - button_margin * 2) // 2
+        restart_button.rect.y = panel_y + (panel_height - button_height) // 2
+        
+        mode_button.rect.x = restart_button.rect.x + button_width + button_margin
+        mode_button.rect.y = panel_y + (panel_height - button_height) // 2
+        
+        exit_button.rect.x = mode_button.rect.x + button_width + button_margin
+        exit_button.rect.y = panel_y + (panel_height - button_height) // 2
+        
+        # Side panel buttons
+        side_panel_x = WIDTH - side_panel_width + (side_panel_width - small_button_width) // 2
+        button_y_start = HEIGHT // 2
+        
+        # Game feature buttons
+        undo_button.rect.x = side_panel_x
+        undo_button.rect.y = button_y_start
+        
+        save_button.rect.x = side_panel_x
+        save_button.rect.y = button_y_start + button_height + button_margin
+        
+        load_button.rect.x = side_panel_x
+        load_button.rect.y = button_y_start + (button_height + button_margin) * 2
+        
+        # Difficulty button
+        difficulty_button.rect.x = side_panel_x
+        difficulty_button.rect.y = button_y_start + (button_height + button_margin) * 3
+        
+        # Network multiplayer buttons
+        host_button.rect.x = side_panel_x
+        host_button.rect.y = button_y_start + (button_height + button_margin) * 4
+        
+        join_button.rect.x = side_panel_x
+        join_button.rect.y = button_y_start + (button_height + button_margin) * 5
+    
+    # Initial button positioning
+    update_button_positions()
     
     while True:
         mouse_pos = pygame.mouse.get_pos()
@@ -734,24 +1072,25 @@ def main():
                 pygame.quit()
                 sys.exit()
             
-            # Handle custom network events
-            if event.type == pygame.USEREVENT:
-                if event.action == "network_move":
-                    # Process move received from network
-                    game.place_piece(event.row, event.col)
-                elif event.action == "update_game_state":
-                    # Update game state from network
-                    game.board = event.state['board']
-                    game.current_player = event.state['current_player']
-                    game.game_over = event.state['game_over']
-                    game.winner = event.state['winner']
-                    game.last_move = event.state['last_move']
+            elif event.type == pygame.VIDEORESIZE:
+                # Update window and board sizes
+                update_display_sizes(event.w, event.h)
+                update_button_positions()
+            
+            elif event.type == pygame.MOUSEWHEEL:
+                # Handle zoom with mouse wheel
+                global zoom_level
+                old_zoom = zoom_level
+                zoom_level = max(MIN_ZOOM, min(MAX_ZOOM, zoom_level + event.y * 0.1))
+                if old_zoom != zoom_level:
+                    update_display_sizes(WIDTH, HEIGHT)
+                    update_button_positions()
             
             # Handle mouse movement for button hover effect
             for button in buttons:
                 button.check_hover(mouse_pos)
             
-            if event.type == pygame.MOUSEBUTTONDOWN:
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:  # Left click
                 # Check if buttons were clicked
                 if restart_button.is_clicked(mouse_pos):
                     game.reset()
@@ -828,10 +1167,13 @@ def main():
                     if can_move:
                         x, y = pygame.mouse.get_pos()
                         # Only process clicks within the board area
-                        if GRID_SIZE <= x <= WIDTH - GRID_SIZE and GRID_SIZE <= y <= WIDTH - GRID_SIZE:
-                            # Convert pixel coordinates to board coordinates
-                            col = round(x / GRID_SIZE) - 1
-                            row = round(y / GRID_SIZE) - 1
+                        board_width = GRID_SIZE * (BOARD_SIZE + 1)
+                        if (board_offset_x <= x <= board_offset_x + board_width and 
+                            board_offset_y <= y <= board_offset_y + board_width):
+                            # Convert pixel coordinates to board coordinates more accurately
+                            # Use floor division to get the nearest grid intersection
+                            col = int((x - board_offset_x + GRID_SIZE/2) // GRID_SIZE) - 1
+                            row = int((y - board_offset_y + GRID_SIZE/2) // GRID_SIZE) - 1
                             
                             # Make the move
                             if game.place_piece(row, col):
@@ -850,9 +1192,13 @@ def main():
                 elif event.key == pygame.K_l:  # 'L' key to load
                     game.load_game()
         
+        # Clear screen
+        screen.fill(WHITE)
+        
+        # Draw game elements
         draw_board()
         draw_pieces(game)
-        draw_status(game)
+        draw_side_panel(game)
         draw_buttons(buttons)
         
         pygame.display.flip()
